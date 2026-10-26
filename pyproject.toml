@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "uninstall-cleaner"
+dynamic = ["version"]
+description = "Windows 卸载残留检测与清理工具"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = []
+
+[project.scripts]
+uninstall-cleaner = "uninstall_cleaner.__main__:main"
+
+[dependency-groups]
+dev = ["pyinstaller>=6.0"]
+
+[tool.hatch.version]
+path = "src/uninstall_cleaner/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/uninstall_cleaner"]

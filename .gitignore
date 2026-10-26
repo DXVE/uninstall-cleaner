@@ -1,0 +1,21 @@
+# Python 缓存与打包元数据
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 虚拟环境
+.venv/
+
+# 构建产物
+build/
+dist/
+
+# 运行时数据
+backups/
+
+# 本地工具与快捷方式
+.zcode/
+*.lnk
+
+# IDE
+.idea/
