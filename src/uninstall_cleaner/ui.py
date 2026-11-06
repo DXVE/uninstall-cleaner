@@ -264,7 +264,6 @@ class App:
         self.remover = Remover()
         self.backup_parent = ""
         self._columns: tuple[str, ...] = ()
-        self._sash_ready = False
         self._log_open = False
         self._tip: tk.Toplevel | None = None
         self._tip_label: tk.Label | None = None
@@ -432,23 +431,48 @@ class App:
         )
         style.map("Treeview.Heading", background=[("active", "#eef0f3")])
 
-        for scrollbar in ("Vertical.TScrollbar", "Horizontal.TScrollbar"):
+        for scrollbar, orient in (
+            ("Vertical.TScrollbar", "Vertical"),
+            ("Horizontal.TScrollbar", "Horizontal"),
+        ):
+            # 去掉两端箭头，仅保留滑轨与滑块，贴合扁平卡片；arrowsize 同时决定滑轨宽度
+            style.layout(
+                scrollbar,
+                [
+                    (
+                        f"{orient}.Scrollbar.trough",
+                        {
+                            "sticky": "ns" if orient == "Vertical" else "ew",
+                            "children": [
+                                (
+                                    f"{orient}.Scrollbar.thumb",
+                                    {"expand": "1", "sticky": "nswe"},
+                                )
+                            ],
+                        },
+                    )
+                ],
+            )
             style.configure(
                 scrollbar,
-                background="#d5d9df",
-                troughcolor=BG,
-                bordercolor=BG,
-                lightcolor="#d5d9df",
-                darkcolor="#d5d9df",
+                background=BORDER_STRONG,
+                troughcolor=CARD,
+                bordercolor=BORDER_STRONG,
+                lightcolor=BORDER_STRONG,
+                darkcolor=BORDER_STRONG,
                 arrowcolor=MUTED,
-                arrowsize=s(12),
+                arrowsize=s(8),
                 gripcount=0,
                 relief="flat",
             )
-            style.map(scrollbar, background=[("active", "#bcc3cc")])
+            style.map(
+                scrollbar,
+                background=[("pressed", "#98a3b0"), ("active", "#b4bcc6")],
+                bordercolor=[("pressed", "#98a3b0"), ("active", "#b4bcc6")],
+                lightcolor=[("pressed", "#98a3b0"), ("active", "#b4bcc6")],
+                darkcolor=[("pressed", "#98a3b0"), ("active", "#b4bcc6")],
+            )
 
-        style.configure("TPanedwindow", background=BG)
-        style.configure("Sash", sashthickness=s(8), gripcount=0, background=BG)
         style.configure(
             "Thin.Horizontal.TProgressbar",
             troughcolor="#e6e8ec",
@@ -727,13 +751,13 @@ class App:
         self.cat_chips.pack(side="left")
 
         # 结果表与详情
-        paned = self.paned = ttk.Panedwindow(pad, orient="horizontal")
-        paned.pack(fill="both", expand=True)
+        split = tk.Frame(pad, background=BG)
+        split.pack(fill="both", expand=True)
 
-        table_card = make_card(paned)
+        table_card = make_card(split)
         table_card.rowconfigure(0, weight=1)
         table_card.columnconfigure(0, weight=1)
-        paned.add(table_card, weight=3)
+        table_card.pack(side="left", fill="both", expand=True, padx=(0, s(8)))
 
         columns = ("sel", "category", "name", "location", "size", "risk", "status")
         self._columns = columns
@@ -759,10 +783,10 @@ class App:
         for column in ("category", "name", "location", "size", "risk"):
             self.tree.heading(column, command=lambda c=column: self._sort_by(c))
 
-        tree_y = ttk.Scrollbar(table_card, orient="vertical", command=self.tree.yview)
+        tree_y = self.tree_y = ttk.Scrollbar(table_card, orient="vertical", command=self.tree.yview)
         tree_x = ttk.Scrollbar(table_card, orient="horizontal", command=self.tree.xview)
         self.tree_x = tree_x
-        self.tree.configure(yscrollcommand=tree_y.set, xscrollcommand=tree_x.set)
+        self.tree.configure(yscrollcommand=self._sync_tree_scroll, xscrollcommand=tree_x.set)
         self.tree.grid(row=0, column=0, sticky="nsew", padx=(s(1), 0), pady=(s(1), 0))
         tree_y.grid(row=0, column=1, sticky="ns", padx=(0, s(1)), pady=(s(1), 0))
         tree_x.grid(row=1, column=0, sticky="ew", padx=(s(1), 0), pady=(0, s(1)))
@@ -820,7 +844,7 @@ class App:
         self.tree.bind("<Control-a>", lambda _: self._select_all())
         self.tree.bind("<Delete>", lambda _: self._delete_checked())
 
-        self._build_detail(paned)
+        self._build_detail(split)
 
         self.context_menu = tk.Menu(self.root, tearoff=0)
         self.context_menu.add_command(label="全选可见项", command=self._select_all)
@@ -835,9 +859,11 @@ class App:
 
         self.root.bind("<F5>", lambda _: self._start_scan())
 
-    def _build_detail(self, paned: ttk.Panedwindow) -> None:
-        card = self.detail_card = make_card(paned)
-        paned.add(card, weight=1)
+    def _build_detail(self, split: tk.Frame) -> None:
+        card = self.detail_card = make_card(split)
+        card.configure(width=s(340))
+        card.pack(side="right", fill="y")
+        card.pack_propagate(False)
         inner = tk.Frame(card, background=CARD, padx=s(16), pady=s(14))
         inner.pack(fill="both", expand=True)
 
@@ -903,8 +929,10 @@ class App:
             spacing3=2,
             cursor="arrow",
         )
-        detail_scroll = ttk.Scrollbar(body, orient="vertical", command=self.detail_text.yview)
-        self.detail_text.configure(yscrollcommand=detail_scroll.set)
+        detail_scroll = self.detail_scroll = ttk.Scrollbar(
+            body, orient="vertical", command=self.detail_text.yview
+        )
+        self.detail_text.configure(yscrollcommand=self._sync_detail_scroll)
         self.detail_text.grid(row=0, column=0, sticky="nsew")
         detail_scroll.grid(row=0, column=1, sticky="ns")
 
@@ -923,6 +951,14 @@ class App:
             "<Configure>",
             lambda event: self._resize_detail_wrap(event.width),
         )
+
+    def _sync_detail_scroll(self, first: str, last: str) -> None:
+        # 内容未超出可视区域时收起滚动条，避免空态下常驻
+        self.detail_scroll.set(first, last)
+        if float(first) <= 0.0 and float(last) >= 1.0:
+            self.detail_scroll.grid_remove()
+        else:
+            self.detail_scroll.grid()
 
     def _resize_detail_wrap(self, width: int) -> None:
         wrap = max(s(160), width - s(50))
@@ -1004,16 +1040,6 @@ class App:
         self.home_frame.pack_forget()
         self.results_frame.pack(fill="both", expand=True)
         self._refresh()
-        if not self._sash_ready:
-            self.root.after(40, self._init_sash)
-
-    def _init_sash(self) -> None:
-        width = self.paned.winfo_width()
-        if width <= 1:
-            self.root.after(60, self._init_sash)
-            return
-        self.paned.sashpos(0, max(s(420), width - s(340)))
-        self._sash_ready = True
 
     # ---------- 扫描 ----------
 
@@ -1176,6 +1202,7 @@ class App:
         self._update_stats()
         self._update_actions()
         self._update_empty_state(visible)
+        self.root.after_idle(self._sync_tree_scroll, *self.tree.yview())
 
     def _tag_for(self, finding: Finding) -> str:
         if finding.status == "已删除":
@@ -1324,6 +1351,14 @@ class App:
         if self.tree.identify("region", event.x, event.y) == "separator":
             return "break"
         return None
+
+    def _sync_tree_scroll(self, first: str, last: str) -> None:
+        # 行数未超出一屏时收起纵向滚动条
+        self.tree_y.set(first, last)
+        if float(first) <= 0.0 and float(last) >= 1.0:
+            self.tree_y.grid_remove()
+        else:
+            self.tree_y.grid()
 
     def _update_hscroll(self, _event=None) -> None:
         # 列宽总和不超过可视区时隐藏横向滚动条
