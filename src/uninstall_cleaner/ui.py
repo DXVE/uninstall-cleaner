@@ -496,13 +496,22 @@ class App:
 
         left = tk.Frame(inner, background=CARD)
         left.pack(side="left")
+        title_row = tk.Frame(left, background=CARD)
+        title_row.pack(anchor="w")
         tk.Label(
-            left,
+            title_row,
             text="卸载残留检测",
             font=("Microsoft YaHei UI", 12, "bold"),
             background=CARD,
             foreground=TEXT,
-        ).pack(anchor="w")
+        ).pack(side="left")
+        tk.Label(
+            title_row,
+            text=f"v{__version__}",
+            font=FONT_SMALL,
+            background=CARD,
+            foreground=MUTED,
+        ).pack(side="left", padx=(s(8), 0))
         tk.Label(
             left,
             text="扫描安装目录、注册表、启动项与服务中的卸载残留",
@@ -572,9 +581,9 @@ class App:
 
     def _build_home(self) -> None:
         card = self.home_card = make_card(self.home_frame)
-        card.place(relx=0.5, rely=0.46, anchor="center", width=s(760))
+        card.place(relx=0.5, rely=0.5, anchor="center", width=s(760))
 
-        inner = tk.Frame(card, background=CARD, padx=s(32), pady=s(28))
+        inner = tk.Frame(card, background=CARD, padx=s(32), pady=s(20))
         inner.pack(fill="both", expand=True)
 
         tk.Label(inner, text="清理卸载残留", font=FONT_H1, background=CARD, foreground=TEXT).pack(anchor="w")
@@ -584,11 +593,11 @@ class App:
             font=FONT,
             background=CARD,
             foreground=MUTED,
-        ).pack(anchor="w", pady=(s(6), s(20)))
+        ).pack(anchor="w", pady=(s(4), s(12)))
 
         tk.Label(inner, text="查找方式", font=FONT_BOLD, background=CARD, foreground=TEXT).pack(anchor="w")
         mode_row = tk.Frame(inner, background=CARD)
-        mode_row.pack(anchor="w", pady=(s(6), s(4)))
+        mode_row.pack(anchor="w", pady=(s(4), s(2)))
         for index, (label, value) in enumerate((("按关键词查找", "关键词"), ("不在程序列表中", "不在程序列表"))):
             Segment(
                 mode_row,
@@ -599,7 +608,7 @@ class App:
             ).pack(side="left", padx=(0 if index == 0 else s(6), 0))
 
         tk.Label(inner, text="关键词", font=FONT_BOLD, background=CARD, foreground=TEXT).pack(
-            anchor="w", pady=(s(10), 0)
+            anchor="w", pady=(s(6), 0)
         )
         self.keyword_entry = ttk.Entry(
             inner,
@@ -607,8 +616,7 @@ class App:
             style="Hero.TEntry",
             font=("Microsoft YaHei UI", 11),
         )
-        self.keyword_entry.pack(fill="x", pady=(s(6), s(6)))
-        self.keyword_entry.bind("<Return>", lambda _: self._start_scan())
+        self.keyword_entry.pack(fill="x", pady=(s(4), s(4)))
         self.keyword_hint = tk.Label(
             inner,
             text="",
@@ -621,7 +629,7 @@ class App:
         self.keyword_hint.pack(anchor="w")
 
         tk.Label(inner, text="检测范围", font=FONT_BOLD, background=CARD, foreground=TEXT).pack(
-            anchor="w", pady=(s(18), s(6))
+            anchor="w", pady=(s(12), s(4))
         )
         cards = tk.Frame(inner, background=CARD)
         cards.pack(fill="x")
@@ -629,10 +637,10 @@ class App:
         cards.columnconfigure(1, weight=1, uniform="scope")
         ScopeCard(
             cards, "文件与目录", "安装目录、用户数据目录中的遗留文件夹", self.var_dirs
-        ).grid(row=0, column=0, sticky="nsew", padx=(0, s(8)), pady=(0, s(8)))
+        ).grid(row=0, column=0, sticky="nsew", padx=(0, s(8)), pady=(0, s(4)))
         ScopeCard(
             cards, "注册表", "软件注册表键与卸载登记信息", self.var_registry
-        ).grid(row=0, column=1, sticky="nsew", pady=(0, s(8)))
+        ).grid(row=0, column=1, sticky="nsew", pady=(0, s(4)))
         ScopeCard(
             cards,
             "启动与后台",
@@ -641,15 +649,18 @@ class App:
         ).grid(row=1, column=0, columnspan=2, sticky="ew")
 
         extra = tk.Frame(inner, background=CARD)
-        extra.pack(fill="x", pady=(s(10), 0))
+        extra.pack(fill="x", pady=(s(6), 0))
         Chip(extra, text="额外扫描各磁盘根目录（较慢）", variable=self.var_drive).pack(side="left")
 
-        self.home_error = tk.Label(inner, text="", font=FONT_SMALL, background=CARD, foreground=DANGER)
-        self.home_error.pack(anchor="w")
+        self.home_error_box = tk.Frame(inner, background=CARD)
+        self.home_error_box.pack(fill="x")
+        self.home_error = tk.Label(
+            self.home_error_box, text="", font=FONT_SMALL, background=CARD, foreground=DANGER
+        )
         self._on_mode_change()
 
         actions = tk.Frame(inner, background=CARD)
-        actions.pack(fill="x", pady=(s(14), 0))
+        actions.pack(fill="x", pady=(s(10), 0))
         self.scan_btn = ttk.Button(
             actions, text="开始扫描", style="Accent.TButton", command=self._start_scan
         )
@@ -664,7 +675,7 @@ class App:
 
         notes = self.home_notes = tk.Frame(inner, background=CARD)
         notes.pack(fill="x")
-        tk.Frame(notes, background=BORDER, height=s(1)).pack(fill="x", pady=(s(18), s(12)))
+        tk.Frame(notes, background=BORDER, height=s(1)).pack(fill="x", pady=(s(12), s(8)))
         for text in (
             "✓  文件与快捷方式通常移入回收站，非固定磁盘或系统关闭回收站时永久删除",
             "✓  注册表、服务与计划任务删除前备份到所选目录",
@@ -833,7 +844,6 @@ class App:
         self.tree.bind("<Button-1>", self._on_tree_click)
         self.tree.bind("<Button-3>", self._show_context_menu)
         self.tree.bind("<Double-1>", lambda _: "break")
-        self.tree.bind("<space>", self._toggle_current)
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
         self.tree.bind("<Motion>", self._on_tree_hover)
         self.tree.bind("<Leave>", self._hide_tooltip)
@@ -843,8 +853,6 @@ class App:
         self.tree.bind("<Configure>", self._update_hscroll)
         self.tree.bind("<ButtonRelease-1>", self._update_hscroll, add="+")
         self.tree.bind("<ButtonPress-1>", self._block_column_drag, add="+")
-        self.tree.bind("<Control-a>", lambda _: self._select_all())
-        self.tree.bind("<Delete>", lambda _: self._delete_checked())
 
         self._build_detail(split)
 
@@ -858,8 +866,6 @@ class App:
         self.context_menu.add_command(label="打开位置", command=self._open_location)
         self.context_menu.add_separator()
         self.context_menu.add_command(label="删除选中项…", command=self._delete_checked)
-
-        self.root.bind("<F5>", lambda _: self._start_scan())
 
     def _build_detail(self, split: tk.Frame) -> None:
         card = self.detail_card = make_card(split)
@@ -1057,7 +1063,14 @@ class App:
                 text="不使用关键词，找出不在已安装程序列表中的目录与注册表键；这些项目可能是卸载残留，均为低风险，需要人工确认。"
             )
         self.home_card.configure(highlightbackground=BORDER, highlightcolor=BORDER)
-        self.home_error.configure(text="")
+        self._set_home_error()
+
+    def _set_home_error(self, text: str = "") -> None:
+        self.home_error.configure(text=text)
+        if text:
+            self.home_error.pack(anchor="w")
+        else:
+            self.home_error.pack_forget()
 
     def _scope_selected(self) -> bool:
         return any([self.var_dirs.get(), self.var_registry.get(), self.var_startup.get()])
@@ -1068,11 +1081,11 @@ class App:
         if not self._scope_selected():
             self._show_home()
             self.home_card.configure(highlightbackground=DANGER, highlightcolor=DANGER)
-            self.home_error.configure(text="请至少选择一项检测范围")
+            self._set_home_error("请至少选择一项检测范围")
             self.status_var.set("请至少选择一项检测范围")
             return
         self.home_card.configure(highlightbackground=BORDER, highlightcolor=BORDER)
-        self.home_error.configure(text="")
+        self._set_home_error()
 
         keyword_mode = self.mode_var.get() == "关键词"
         keywords = (
@@ -1083,7 +1096,7 @@ class App:
         if keyword_mode and not keywords:
             self._show_home()
             self.home_card.configure(highlightbackground=DANGER, highlightcolor=DANGER)
-            self.home_error.configure(text="请输入关键词，或切换到“不在程序列表中”")
+            self._set_home_error("请输入关键词，或切换到“不在程序列表中”")
             self.status_var.set("请输入关键词，或切换到“不在程序列表中”")
             self.keyword_entry.focus_set()
             return
@@ -1106,6 +1119,7 @@ class App:
         self._refresh()
         self._set_detail(None)
         self.scan_btn.configure(state="disabled")
+        self.back_btn.configure(state="disabled")
         self.scanner = Scanner(options, progress=self._on_progress, log=self._on_log)
         self._show_results()
         self.status_var.set("正在扫描…")
@@ -1151,6 +1165,7 @@ class App:
     def _handle_scan_done(self, findings: list[Finding], error: Exception | None) -> None:
         self.scanner = None
         self.scan_btn.configure(state="normal")
+        self.back_btn.configure(state="normal")
         if error is not None:
             self.status_var.set("扫描失败")
             self._log(f"扫描失败：{error}")
@@ -1452,12 +1467,6 @@ class App:
         self._tip_state = None
         if self._tip is not None:
             self._tip.withdraw()
-
-    def _toggle_current(self, _event=None) -> str:
-        selection = self.tree.selection()
-        if selection:
-            self._toggle_finding(self.by_iid.get(selection[0]))
-        return "break"
 
     def _toggle_finding(self, finding: Finding | None) -> None:
         if finding is None:

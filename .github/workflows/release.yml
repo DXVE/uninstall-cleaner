@@ -43,6 +43,10 @@ jobs:
         # 打包需要可用的 tkinter，缺失时提前失败，避免产出无法启动的 exe
         run: uv run python -c "import tkinter; print('Tk', tkinter.TkVersion)"
 
+      - name: 运行单元测试
+        # 测试失败时不打包，避免带回归的 exe 进入 Release
+        run: uv run python -m unittest discover -s tests
+
       - name: PyInstaller 打包 exe
         # 单文件、无控制台窗口，配置见 packaging/uninstall-cleaner.spec
         run: >
