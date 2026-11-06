@@ -61,10 +61,6 @@ class ScanOptions:
     detect_unmatched: bool = True
     scan_drive_roots: bool = False
 
-    @property
-    def keyword_text(self) -> str:
-        return ",".join(self.keywords)
-
 
 @dataclass
 class Finding:
@@ -75,7 +71,6 @@ class Finding:
     action: ActionKind
     reasons: list[str] = field(default_factory=list)
     size: int = 0
-    mtime: float = 0.0
     protected: bool = False
     protected_reason: str = ""
     keywords: list[str] = field(default_factory=list)
@@ -104,7 +99,7 @@ class Finding:
 
     @property
     def deletable(self) -> bool:
-        return not self.protected and self.status != "已删除"
+        return not self.protected and self.status not in ("已删除", "待重启生效")
 
 
 def human_size(size: int) -> str:

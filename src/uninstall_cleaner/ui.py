@@ -258,6 +258,8 @@ class App:
         self.by_iid: dict[str, Finding] = {}
         self.current: Finding | None = None
         self.scanner: Scanner | None = None
+        self.removing = False
+        self._close_pending = False
         self.queue: queue.Queue = queue.Queue()
         self.sort_column = "risk"
         self.sort_reverse = False
@@ -664,7 +666,7 @@ class App:
         notes.pack(fill="x")
         tk.Frame(notes, background=BORDER, height=s(1)).pack(fill="x", pady=(s(18), s(12)))
         for text in (
-            "✓  文件与快捷方式移入回收站，可随时还原",
+            "✓  文件与快捷方式通常移入回收站，非固定磁盘或系统关闭回收站时永久删除",
             "✓  注册表、服务与计划任务删除前备份到所选目录",
         ):
             tk.Label(
@@ -1026,7 +1028,9 @@ class App:
         self.results_frame.pack_forget()
         self.home_frame.pack(fill="both", expand=True)
         self._refresh_home_back()
-        self.scan_btn.configure(state="disabled" if self.scanner is not None else "normal")
+        self.scan_btn.configure(
+            state="disabled" if self.scanner is not None or self.removing else "normal"
+        )
         self.keyword_entry.focus_set()
 
     def _refresh_home_back(self) -> None:
@@ -1059,7 +1063,7 @@ class App:
         return any([self.var_dirs.get(), self.var_registry.get(), self.var_startup.get()])
 
     def _start_scan(self) -> None:
-        if self.scanner is not None:
+        if self.scanner is not None or self.removing:
             return
         if not self._scope_selected():
             self._show_home()
@@ -1205,7 +1209,7 @@ class App:
         self.root.after_idle(self._sync_tree_scroll, *self.tree.yview())
 
     def _tag_for(self, finding: Finding) -> str:
-        if finding.status == "已删除":
+        if finding.status in ("已删除", "待重启生效"):
             return "deleted"
         if finding.protected:
             return "protected"
@@ -1260,13 +1264,17 @@ class App:
         self.stat_values["protected"].configure(text=str(protected))
 
     def _checked_count(self) -> int:
-        return sum(1 for f in self.findings if f.key in self.checked and f.deletable)
+        return sum(1 for f in self._visible_findings() if f.key in self.checked and f.deletable)
 
     def _update_actions(self) -> None:
         count = self._checked_count()
         self.delete_btn.configure(
             text=f"删除选中项（{count}）" if count else "删除选中项",
-            state="normal" if count and self.scanner is None else "disabled",
+            state=(
+                "normal"
+                if count and self.scanner is None and not self.removing
+                else "disabled"
+            ),
         )
 
     def _update_empty_state(self, visible: list[Finding] | None = None) -> None:
@@ -1588,26 +1596,40 @@ class App:
                     subprocess.Popen(["explorer.exe", "/select,", finding.location])
             else:
                 self._copy_path()
-                self._log("注册表项路径已复制，可在 regedit 中定位")
+                if finding.action == ActionKind.DELETE_TASK:
+                    self._log("任务路径已复制，可在任务计划程序中定位")
+                else:
+                    self._log("注册表路径已复制，可在 regedit 中定位")
         except OSError as exc:
             messagebox.showerror("打开失败", str(exc))
 
     # ---------- 删除 ----------
 
     def _delete_checked(self) -> None:
-        if self.scanner is not None:
+        if self.scanner is not None or self.removing:
             return
-        selected = [f for f in self.findings if f.key in self.checked and f.deletable]
+        selected = [f for f in self._visible_findings() if f.key in self.checked and f.deletable]
         if not selected:
             messagebox.showinfo("提示", "请先勾选要删除的项。")
             return
         problems = self.remover.validate(selected)
         if problems:
-            preview = "\n".join(problems[:10])
+            preview = "\n".join(text for _, text in problems[:10])
             if len(problems) > 10:
                 preview += f"\n… 另有 {len(problems) - 10} 项"
-            messagebox.showwarning("存在不可删除项", preview)
-            return
+            if len(problems) >= len(selected):
+                messagebox.showwarning("存在不可删除项", preview)
+                return
+            if not messagebox.askyesno(
+                "存在不可删除项",
+                f"{preview}\n\n跳过这些项目，继续清理其余 {len(selected) - len(problems)} 项？",
+                icon="warning",
+            ):
+                return
+            invalid = {finding.key for finding, _ in problems}
+            selected = [finding for finding in selected if finding.key not in invalid]
+            for finding, _ in problems:
+                self.checked.discard(finding.key)
         needs_backup = any(f.action != ActionKind.RECYCLE_FILE for f in selected)
         backup_dir = ""
         if needs_backup:
@@ -1617,33 +1639,50 @@ class App:
                 return
             self.backup_parent = parent
             backup_dir = str(plan_backup_dir(parent))
+        permanent_items = [
+            f
+            for f in selected
+            if f.action == ActionKind.RECYCLE_FILE
+            and not self.remover.recycle_supported(f.location)
+        ]
         counts = Counter(f.action.value for f in selected)
         total_size = sum(f.size for f in selected)
-        backup_note = (
-            f"注册表项、服务与计划任务会先备份到：\n{backup_dir}"
-            if backup_dir
-            else "本次只移入回收站，不生成备份文件。"
-        )
+        if backup_dir:
+            backup_note = f"注册表项、服务与计划任务会先备份到：\n{backup_dir}"
+        elif permanent_items:
+            backup_note = "本次不生成备份文件。"
+        else:
+            backup_note = "本次只移入回收站，不生成备份文件。"
         lines = [f"共 {len(selected)} 项，约 {human_size(total_size)}："]
         lines.extend(f"  · {action}：{count} 项" for action, count in counts.items())
-        lines.extend(
-            [
-                "",
-                "文件与快捷方式将移入回收站，可从回收站还原。",
-                backup_note,
-                "",
-                "确认执行？",
-            ]
-        )
+        lines.extend(["", "文件与快捷方式通常移入回收站，可从回收站还原。"])
+        if permanent_items:
+            lines.append(
+                f"注意：{len(permanent_items)} 项无法移入回收站（磁盘类型或系统策略限制），"
+                "将永久删除且不能还原。"
+            )
+        lines.extend([backup_note, "", "确认执行？"])
         if not messagebox.askyesno("确认删除", "\n".join(lines), icon="warning"):
             return
+        self.removing = True
         self.delete_btn.configure(state="disabled")
         self.scan_btn.configure(state="disabled")
         self.back_btn.configure(state="disabled")
         self.status_var.set("正在清理…")
-        threading.Thread(
-            target=self._remove_worker, args=(selected, backup_dir), daemon=True
-        ).start()
+        worker = threading.Thread(
+            target=self._remove_worker,
+            args=(selected, backup_dir, bool(permanent_items)),
+            daemon=True,
+        )
+        try:
+            worker.start()
+        except RuntimeError as exc:
+            self.removing = False
+            self.scan_btn.configure(state="normal")
+            self.back_btn.configure(state="normal")
+            self.status_var.set("清理未开始")
+            self._refresh()
+            messagebox.showerror("清理失败", str(exc))
 
     def _ask_backup_parent(self, selected: list[Finding]) -> str:
         initial = self.backup_parent or os.path.expanduser("~")
@@ -1665,7 +1704,9 @@ class App:
                 continue
             return parent
 
-    def _remove_worker(self, selected: list[Finding], backup_dir: str) -> None:
+    def _remove_worker(
+        self, selected: list[Finding], backup_dir: str, allow_permanent: bool
+    ) -> None:
         try:
             summary = self.remover.remove(
                 selected,
@@ -1673,14 +1714,23 @@ class App:
                 progress=lambda index, total, result: self.queue.put(
                     ("remove_progress", index, total, result.finding.name)
                 ),
+                allow_permanent=allow_permanent,
             )
             self.queue.put(("remove_done", summary, None))
         except Exception as exc:  # noqa: BLE001
             self.queue.put(("remove_done", None, exc))
 
     def _handle_remove_done(self, summary, error: Exception | None) -> None:
+        self.removing = False
         self.scan_btn.configure(state="normal")
         self.back_btn.configure(state="normal")
+        if self._close_pending:
+            if error is not None:
+                self._log(f"清理失败：{error}")
+            else:
+                self._log("清理完成，正在退出")
+            self.root.destroy()
+            return
         if error is not None:
             self.status_var.set("清理失败")
             self._log(f"清理失败：{error}")
@@ -1689,21 +1739,54 @@ class App:
             return
         for result in summary.results:
             flag = "成功" if result.ok else "失败"
-            self._log(f"{flag}：{result.finding.location}" + (f"（{result.message}）" if not result.ok else ""))
+            detail = f"（{result.message}）" if result.message else ""
+            self._log(f"{flag}：{result.finding.location}{detail}")
+        if summary.manifest_error:
+            self._log(f"备份清单写入失败：{summary.manifest_error}")
         self.checked = {key for key in self.checked if any(f.key == key and f.deletable for f in self.findings)}
         self._build_category_chips()
         self._refresh()
         self.status_var.set(f"清理完成：成功 {summary.succeeded} 项，失败 {summary.failed} 项")
+        pending = sum(
+            1 for result in summary.results if result.finding.status == "待重启生效"
+        )
+        file_note = ""
+        file_results = [
+            result
+            for result in summary.results
+            if result.ok and result.finding.action == ActionKind.RECYCLE_FILE
+        ]
+        if summary.permanent:
+            file_note = (
+                f"其中 {summary.permanent} 项无法移入回收站（磁盘类型或系统策略限制），"
+                "已按永久删除执行，无法从回收站恢复。"
+            )
+            recycled = sum(
+                1
+                for result in file_results
+                if self.remover.recycle_supported(result.finding.location)
+            )
+            if recycled:
+                file_note += "其余文件已移入回收站。"
+        elif file_results:
+            file_note = "文件已移入回收站，可从回收站还原。"
+        extra = (
+            f"\n\n警告：备份清单写入失败：{summary.manifest_error}"
+            if summary.manifest_error
+            else ""
+        )
+        if pending:
+            extra += f"\n其中 {pending} 项服务已标记删除，重启后生效。"
         if summary.backup_dir:
             message = (
                 f"成功 {summary.succeeded} 项，失败 {summary.failed} 项。\n\n"
                 f"备份目录：\n{summary.backup_dir}\n\n"
-                "文件已移入回收站，可从回收站还原；注册表项可双击备份的 .reg 文件恢复。"
+                f"{file_note}注册表项可双击备份的 .reg 文件恢复。{extra}"
             )
         else:
             message = (
                 f"成功 {summary.succeeded} 项，失败 {summary.failed} 项。\n\n"
-                "本次只移入回收站，未生成备份文件，可从回收站还原。"
+                f"{file_note}{extra}"
             )
         messagebox.showinfo("清理结果", message)
 
@@ -1730,7 +1813,8 @@ class App:
             "关于",
             f"uninstall-cleaner v{__version__}\n\n"
             "扫描安装目录、用户数据目录、注册表与启动项中的卸载残留。\n"
-            "文件删除均进入回收站，注册表与服务删除前备份到所选目录。",
+            "固定磁盘上的文件删除进入回收站；系统关闭回收站或非固定磁盘时确认后永久删除。\n"
+            "注册表与服务删除前备份到所选目录。",
         )
 
     def _open_backups(self) -> None:
@@ -1753,6 +1837,9 @@ class App:
             self.admin_pill.configure(text="标准用户（需提权）", foreground=WARN, background=WARN_TINT)
 
     def _elevate(self) -> None:
+        if self.removing:
+            messagebox.showwarning("正在清理", "清理尚未完成，请等待结束后再切换权限。")
+            return
         if elevation.is_admin():
             messagebox.showinfo("提示", "当前已是管理员权限。")
             return
@@ -1771,6 +1858,19 @@ class App:
         self.log_text.configure(state="disabled")
 
     def _on_close(self) -> None:
+        if self.removing:
+            if self._close_pending:
+                return
+            if not messagebox.askyesno(
+                "正在清理",
+                "清理完成后将自动退出。强制退出会中断删除并可能留下不完整记录。\n\n"
+                "是否等待清理完成后再退出？",
+                icon="warning",
+            ):
+                return
+            self._close_pending = True
+            self.status_var.set("清理完成后将自动退出")
+            return
         if self.scanner is not None:
             self.scanner.cancel()
         self.root.destroy()

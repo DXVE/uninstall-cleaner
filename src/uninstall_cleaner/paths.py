@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import os
-import stat
 import sys
+import threading
 from pathlib import Path
 
 from .models import Category
@@ -224,18 +224,24 @@ def iter_child_dirs(path: str, max_depth: int = 1) -> list[tuple[str, int]]:
     return result
 
 
-def dir_size(path: str, max_files: int = 200_000) -> tuple[int, int, bool]:
+def dir_size(
+    path: str, max_files: int = 200_000, cancel: threading.Event | None = None
+) -> tuple[int, int, bool]:
     """统计目录体积，返回 (字节数, 文件数, 是否因上限截断)。"""
     total = 0
     count = 0
     stack = [path]
     while stack:
+        if cancel is not None and cancel.is_set():
+            return total, count, True
         current = stack.pop()
         try:
             entries = list(os.scandir(current))
         except (OSError, PermissionError):
             continue
         for entry in entries:
+            if cancel is not None and cancel.is_set():
+                return total, count, True
             if is_reparse(entry):
                 continue
             try:
@@ -249,13 +255,6 @@ def dir_size(path: str, max_files: int = 200_000) -> tuple[int, int, bool]:
             except OSError:
                 continue
     return total, count, False
-
-
-def path_mtime(path: str) -> float:
-    try:
-        return os.stat(path).st_mtime
-    except OSError:
-        return 0.0
 
 
 def has_executable(path: str, max_depth: int = 3, max_entries: int = 5000) -> bool:

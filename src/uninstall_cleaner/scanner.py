@@ -30,6 +30,27 @@ GUID_RE = re.compile(
     re.IGNORECASE,
 )
 
+# 应用内部子目录名：只承载主程序组件，不单独作为残留项上报
+GENERIC_CHILD_DIRS = {
+    "bin",
+    "lib",
+    "lib64",
+    "plugins",
+    "plugin",
+    "resources",
+    "assets",
+    "data",
+    "docs",
+    "runtime",
+    "modules",
+    "locales",
+    "translations",
+    "x86",
+    "x64",
+    "win32",
+    "win64",
+}
+
 
 def normalize_name(text: str) -> str:
     cleaned = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", " ", (text or "").lower())
@@ -42,6 +63,24 @@ class _AppIndex:
     names: list[tuple[str, InstalledApp]]
     publishers: list[tuple[str, InstalledApp]]
     locations: list[tuple[str, InstalledApp]]
+
+
+def _broad_install_location(location: str, roots: set[str]) -> bool:
+    """判断安装位置是否过宽：磁盘根、系统根、扫描根的祖先与系统共用目录。"""
+    if not location:
+        return True
+    _, tail = os.path.splitdrive(location)
+    if tail in ("", os.sep):
+        return True
+    if location in roots:
+        return True
+    if any(paths.is_under(root, location) for root in roots):
+        return True
+    windir = paths.norm(paths.env_path("SystemRoot"))
+    if windir and paths.is_under(location, windir):
+        return True
+    parts = [part for part in location.split(os.sep) if part]
+    return any(paths.is_system_name(part) for part in parts[1:])
 
 
 class Scanner:
@@ -103,6 +142,9 @@ class Scanner:
         names: list[tuple[str, InstalledApp]] = []
         publishers: list[tuple[str, InstalledApp]] = []
         locations: list[tuple[str, InstalledApp]] = []
+        broad_roots = {paths.norm(path) for path, _ in paths.scan_roots()} | set(
+            paths.critical_roots()
+        )
         for app in apps:
             name = normalize_name(app.display_name)
             if len(name) >= 3:
@@ -111,7 +153,9 @@ class Scanner:
             if len(publisher) >= 3:
                 publishers.append((publisher, app))
             if app.install_location:
-                locations.append((paths.norm(app.install_location).rstrip("\\/"), app))
+                location = paths.norm(app.install_location).rstrip("\\/")
+                if not _broad_install_location(location, broad_roots):
+                    locations.append((location, app))
         return _AppIndex(apps, names, publishers, locations)
 
     def _match_app(self, name: str, path: str = "") -> InstalledApp | None:
@@ -215,10 +259,6 @@ class Scanner:
                 if self.cancelled:
                     return
                 self._scan_dir_root(drive, Category.INSTALL_DIR, drive_root=True)
-        for path in list(self._findings):
-            finding = self._findings[path]
-            if finding.category in (Category.INSTALL_DIR, Category.USER_DATA):
-                finding.mtime = paths.path_mtime(finding.location)
 
     def _scan_dir_root(self, root: str, category: Category, drive_root: bool = False) -> None:
         try:
@@ -285,8 +325,9 @@ class Scanner:
         self._progress("目录", path, len(self._findings))
 
     def _is_container(self, path: str) -> bool:
-        files = 0
-        dirs = 0
+        """判断目录是否为厂商容器：容器展开到子目录，应用目录整条上报。"""
+        dirs: list[os.DirEntry] = []
+        top_exe = False
         try:
             entries = list(os.scandir(path))
         except (OSError, PermissionError):
@@ -296,12 +337,28 @@ class Scanner:
                 continue
             try:
                 if entry.is_dir(follow_symlinks=False):
-                    dirs += 1
-                elif entry.is_file(follow_symlinks=False):
-                    files += 1
+                    dirs.append(entry)
+                elif entry.is_file(follow_symlinks=False) and entry.name.lower().endswith(".exe"):
+                    top_exe = True
             except OSError:
                 continue
-        return dirs > 0 and files == 0
+        if not dirs:
+            return False
+        standalone = [
+            entry for entry in dirs if entry.name.lower() not in GENERIC_CHILD_DIRS
+        ]
+        if not standalone:
+            return False
+        if any(self._match_app("", entry.path) for entry in dirs):
+            return True
+        exe_children = [
+            entry
+            for entry in standalone
+            if paths.has_executable(entry.path, max_depth=3, max_entries=1000)
+        ]
+        if top_exe:
+            return len(exe_children) >= 2
+        return bool(exe_children)
 
     # ---------- 注册表 ----------
 
@@ -402,13 +459,19 @@ class Scanner:
                 continue
             if target and target.lower().startswith(os.environ.get("SystemRoot", r"C:\Windows").lower()):
                 continue
+            protected = bool(service.service_type & 0x0B)
+            reasons = [f"服务映像文件不存在：{target or service.image_path}"]
+            if protected:
+                reasons.append("受保护：驱动服务，默认不删除")
             finding = Finding(
                 category=Category.SERVICE,
                 name=service.display_name,
                 location=f"{registry.SERVICES_KEY}\\{service.name}",
                 risk=Risk.HIGH,
                 action=ActionKind.DELETE_SERVICE,
-                reasons=[f"服务映像文件不存在：{target or service.image_path}"],
+                reasons=reasons,
+                protected=protected,
+                protected_reason="驱动服务，默认不删除" if protected else "",
                 service_name=service.name,
                 target=target,
             )
@@ -460,6 +523,8 @@ class Scanner:
             if exists is not False:
                 continue
             task_path = f"{item.get('TaskPath') or ''}{item.get('TaskName') or ''}"
+            if task_path.lower().startswith("\\microsoft\\windows"):
+                continue
             finding = Finding(
                 category=Category.TASK,
                 name=item.get("TaskName") or task_path,
@@ -554,7 +619,7 @@ class Scanner:
             futures = {}
             for finding in targets:
                 limit = 100_000 if finding.risk == Risk.LOW else 300_000
-                futures[executor.submit(paths.dir_size, finding.location, limit)] = finding
+                futures[executor.submit(paths.dir_size, finding.location, limit, self._cancel)] = finding
             for future in as_completed(futures):
                 if self.cancelled:
                     executor.shutdown(wait=False, cancel_futures=True)
@@ -566,7 +631,6 @@ class Scanner:
                     self._log_cb(f"统计失败：{finding.location}：{exc}")
                     continue
                 finding.size = size
-                finding.mtime = paths.path_mtime(finding.location)
-                if truncated:
+                if truncated and not self.cancelled:
                     finding.reasons.append(f"体积统计达到上限（已统计 {count} 个文件）")
                 self._progress("统计", finding.location, len(self._findings))

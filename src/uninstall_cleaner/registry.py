@@ -6,12 +6,15 @@ import os
 import re
 import shutil
 import subprocess
+import time
 import winreg
 from dataclasses import dataclass
+from functools import lru_cache
 
 from .models import Hive, InstalledApp
 
 CREATE_NO_WINDOW = 0x08000000
+SERVICE_PENDING = "已标记删除，重启后生效"
 
 HIVE_MAP = {
     Hive.HKLM: winreg.HKEY_LOCAL_MACHINE,
@@ -42,6 +45,21 @@ SOFTWARE_ROOTS = [
 ]
 
 EXE_EXTENSIONS = (".exe", ".com", ".bat", ".cmd", ".scr")
+
+
+@lru_cache(maxsize=1)
+def recycle_disabled() -> bool:
+    """检查用户或机器策略是否关闭了回收站。"""
+    for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        try:
+            with winreg.OpenKey(
+                hive, r"Software\Microsoft\Windows\CurrentVersion\Policies\Explorer"
+            ) as key:
+                if winreg.QueryValueEx(key, "NoRecycleFiles")[0] == 1:
+                    return True
+        except OSError:
+            continue
+    return False
 
 
 def read_values(hive: Hive, path: str) -> dict[str, str]:
@@ -75,14 +93,6 @@ def list_subkeys(hive: Hive, path: str) -> list[str]:
     except OSError:
         return []
     return names
-
-
-def key_exists(hive: Hive, path: str) -> bool:
-    try:
-        with winreg.OpenKey(HIVE_MAP[hive], path, 0, winreg.KEY_READ):
-            return True
-    except OSError:
-        return False
 
 
 def full_key(hive: Hive, path: str) -> str:
@@ -227,6 +237,70 @@ def export_key(hive: Hive, path: str, dest: str) -> tuple[bool, str]:
     return True, dest
 
 
+def _reg_escape(text: str) -> str:
+    return text.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def export_value(hive: Hive, path: str, name: str, dest: str) -> tuple[bool, str]:
+    """导出单个注册表值，恢复时只导入该值，不影响同键其他值。"""
+    temp = dest + ".tmp"
+    try:
+        ok, message = export_key(hive, path, temp)
+        if not ok:
+            return False, message
+        try:
+            with open(temp, "r", encoding="utf-16") as handle:
+                text = handle.read()
+        except OSError as exc:
+            return False, str(exc)
+    finally:
+        try:
+            os.remove(temp)
+        except OSError:
+            pass
+
+    target_section = f"[{full_key(hive, path)}]".lower()
+    prefixes = (
+        {"@="}
+        if not name
+        else {f'"{_reg_escape(name)}"='.lower(), f'"{name}"='.lower()}
+    )
+    lines: list[str] = []
+    in_target = False
+    collecting = False
+    for line in text.splitlines():
+        if line.startswith("["):
+            in_target = line.strip().lower() == target_section
+            collecting = False
+            continue
+        if not in_target:
+            continue
+        if collecting:
+            lines.append(line)
+            collecting = line.rstrip().endswith("\\")
+            continue
+        if line.lower().startswith(tuple(prefixes)):
+            lines.append(line)
+            collecting = line.rstrip().endswith("\\")
+    if not lines:
+        return False, "未找到要备份的注册表值"
+    content = "\r\n".join(
+        [
+            "Windows Registry Editor Version 5.00",
+            "",
+            f"[{full_key(hive, path)}]",
+            *lines,
+            "",
+        ]
+    )
+    try:
+        with open(dest, "w", encoding="utf-16", newline="") as handle:
+            handle.write(content)
+    except OSError as exc:
+        return False, str(exc)
+    return True, dest
+
+
 def delete_key(hive: Hive, path: str) -> tuple[bool, str]:
     try:
         proc = subprocess.run(
@@ -254,19 +328,57 @@ def delete_value(hive: Hive, path: str, name: str) -> tuple[bool, str]:
     return True, ""
 
 
-def delete_service(name: str) -> tuple[bool, str]:
+def _run_sc(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["sc.exe", *args],
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=60,
+        creationflags=CREATE_NO_WINDOW,
+    )
+
+
+def stop_service(name: str) -> tuple[bool, str]:
+    """停止服务；已停止、不存在或无法控制时返回对应结果。"""
     try:
-        proc = subprocess.run(
-            ["sc", "delete", name],
-            capture_output=True,
-            text=True,
-            errors="replace",
-            timeout=60,
-            creationflags=CREATE_NO_WINDOW,
-        )
+        proc = _run_sc("stop", name)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, str(exc)
+    message = (proc.stderr or proc.stdout or "").strip()
+    if proc.returncode != 0:
+        if "1062" in message or "1060" in message:
+            return True, ""
+        return False, message or f"sc stop 返回码 {proc.returncode}"
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            query = _run_sc("query", name)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return False, str(exc)
+        text = query.stdout or query.stderr or ""
+        if "1060" in text:
+            return True, ""
+        match = re.search(r"(?:STATE|状态)\s*:\s*(\d+)", text, re.IGNORECASE)
+        if match and int(match.group(1)) == 1:
+            return True, ""
+        time.sleep(0.3)
+    return False, "服务停止超时"
+
+
+def delete_service(name: str) -> tuple[bool, str]:
+    stopped, _ = stop_service(name)
+    try:
+        proc = _run_sc("delete", name)
     except (OSError, subprocess.SubprocessError) as exc:
         return False, str(exc)
     if proc.returncode != 0:
         message = (proc.stderr or proc.stdout or "").strip()
+        if "1072" in message:
+            return True, SERVICE_PENDING
+        if "1060" in message:
+            return True, ""
         return False, message or f"sc delete 返回码 {proc.returncode}"
+    if not stopped:
+        return True, SERVICE_PENDING
     return True, ""
